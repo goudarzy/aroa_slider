@@ -1,0 +1,356 @@
+<?php
+
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function aroa_slider_form_alter(&$form, &$form_state, $form_id) {
+	if(!isset($form["#node"]) ||  !isset($form["type"]["#value"]))return;
+	$nodeType=variable_get('aroa_slider_block_content_type', 'aroa_slider_all_type');
+	if($nodeType!='aroa_slider_all_type' && $form["type"]["#value"]!=$nodeType )return;
+	$oldData["show"]=$oldData["fid"]=0;
+	if(isset($form['#node']->nid))$oldData=db_query('SELECT * FROM {aroa_slider} WHERE `nid`=:nid ',array(':nid'=>(int)$form['#node']->nid))->fetchAssoc();
+
+	
+	$form['aroa_slider_tab'] =array(
+		'#type' => 'fieldset',
+		'#title' => 'Aroa Slider',
+		'#collapsible' => 1,
+		'#collapsed' => 1,
+		'#group' => 'additional_settings',
+		'#weight' => -1000,
+		'#access' => 1,		
+		'aroa_slider_chekbox' => array(
+			'#type' => 'checkbox',
+			'#title' => 'Show in SlideShow',
+			'#default_value' => 0,
+			'#value' => $oldData["show"],
+			'#access' => 1,
+		),
+		'aroa_slider_image' => array(
+			'#type' => 'managed_file',
+			'#name' => 'aroa_slider_image',
+			'#title' => t('Slider Image'),
+			'#upload_location' => 'public://aroa_slider/',
+			'#upload_validators' => array('file_validate_extensions' => array('gif png jpg jpeg')),
+			'#default_value'=>$oldData["fid"]
+		)
+		
+	);
+	$form['#submit'][]='aroa_slider_form_submit';
+}
+
+function aroa_slider_form_submit($form, &$form_state) {
+	if(!isset($form_state['values']['nid']) || !isset($form_state['values']['aroa_slider_image']))return;	
+	$aroa_slider = array(
+		':nid' => (int)$form['nid']['#value'],
+		':show' => isset($form_state['input']['aroa_slider_chekbox']) ? (int) $form_state['input']['aroa_slider_chekbox'] : 0 ,
+		':fid' => isset($form_state['values']['aroa_slider_image']) ? (int)$form_state['values']['aroa_slider_image'] : 0,
+		':time'=>time()
+	);
+	db_query('INSERT INTO {aroa_slider} (`nid`,`fid`,`show`,`time`) VALUES (:nid,:fid,:show,:time) ON DUPLICATE KEY UPDATE `fid`=:fid , `show`=:show, `time`= :time',$aroa_slider);
+}
+
+
+
+
+
+/**
+ * Implements hook_block_info().
+ */
+function aroa_slider_block_info() {
+	$blocks['aroa_slider_block'] = array(
+		'info' => t('Aroa Simple Slider'),
+		'cache' => DRUPAL_NO_CACHE
+		#'cache' => DRUPAL_CACHE_GLOBAL,
+	);
+	return $blocks;
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function aroa_slider_block_view($delta = '') {
+	$block = array();
+	switch ($delta) {
+		case 'aroa_slider_block':
+			$CasheID="aroa_slider_".md5(current_path());
+			$aroaCache=cache_get($CasheID);
+			$lifeTime=intval(variable_get('aroa_slider_block_cache_lifetime', 1800));
+			if((!$aroaCache || !isset($aroaCache->data["html"]) || !isset($aroaCache->data["Cnt"])) ||  ( isset($aroaCache->created) && intval($aroaCache->created)+$lifeTime < time() )){
+				
+				if(preg_match('#^taxonomy/term/([0-9]+)$#i',current_path(),$tmpArr))$query=db_query('SELECT  * FROM `{aroa_slider}` INNER JOIN `{taxonomy_index}` ON `{taxonomy_index}`.`nid` = `{aroa_slider}`.`nid`  WHERE `{aroa_slider}`.`show`=1 AND `{aroa_slider}`.`fid`!=0 AND  `{taxonomy_index}`.`tid` = :tid  ORDER BY `{aroa_slider}`.`time` DESC LIMIT 0, '.((int)variable_get('aroa_slider_block_node_count', 4)+1),array(":tid"=>intval($tmpArr[1])));
+				else $query=db_query('SELECT * FROM {aroa_slider} WHERE `show`=1 AND `fid`!=0 ORDER BY `time` DESC LIMIT 0, '.((int)variable_get('aroa_slider_block_node_count', 4)+1));
+				
+				
+				foreach ($query as $record)$result[$record->nid]=$record;
+				if(!isset($result)) return array();
+				$nodes=node_load_multiple(array_keys($result));
+				$html="";$Cnt=0;$Spans="";
+				foreach($nodes as $nid=>$node){
+					$image = file_load($result[$nid]->fid);
+					if(!isset($image->uri))continue;
+					$image = image_load($image->uri);
+					$image = array(
+					  'file' => array(
+						'#theme' => 'image_style',
+						'#style_name' => variable_get('aroa_slider_block_image_styles', 'large'),
+						'#path' => $image->source,
+					  ),
+					);
+					$image= drupal_render($image);
+					$title ="<a href='".url("node/".$node->nid)."' >". $node->title."</a>";
+					$body = field_get_items('node', $node, 'body');
+					if(is_array($body) && isset($body[0])){
+						$body=field_view_value('node', $node, 'body', $body[0],array('type' => 'text_trimmed', 'settings' => array('trim_length' => 200)));
+						$body =drupal_render($body);
+					}else $body="";
+					$Cnt++;
+					$html.="<div class='aroa-slider aroa-slider-".$node->nid."' id='aroa-slider-".$Cnt."'><div class='aroa-slider-image aroa-slider-image-".$node->nid."'>".$image."</div><h2 class='aroa-slider-title aroa-slider-title-".$node->nid."'>".$title."</h2><div class='aroa-slider-body aroa-slider-body-".$node->nid."'>".$body."</div></div>\n";
+					$Spans.="<span showid='$Cnt' title='".$node->title."'></span>";
+				}
+				if($Cnt==0)return array();
+				$html="<div id='aroa-slider-pos-1' class='aroa-slider-box'><div class='aroa-slider-content'>".$html."</div>";
+				$html.="<div class='aroa-slider-keys'>".$Spans."</div></div>";			
+				if($lifeTime > 0)cache_set($CasheID, array('Cnt'=>$Cnt,'html'=>$html),'cache',time()+$lifeTime);
+			}else{
+				$html=$aroaCache->data["html"];
+				$Cnt=intval($aroaCache->data["Cnt"]);
+			}
+			_aroa_slider_add_css_js($Cnt);
+			$block["content"]=array("#markup"=>$html);		
+		break;
+	}
+	return $block;
+}
+
+
+function _aroa_slider_add_css_js($Count){
+	if($Count<1)return;
+	$width=variable_get('aroa_slider_block_width', 990);
+	$height=variable_get('aroa_slider_block_height', 270); 
+	$color=variable_get('aroa_slider_block_title_color', "#FFFFFF"); 
+	$hoverColor=variable_get('aroa_slider_block_title_hover_color', "#FFFFFF"); 
+	$bodyColor=variable_get('aroa_slider_block_body_color', "#FFFFFF"); 
+	global $language;
+	$left=($language->direction==0) ? "left" : "right";
+	$right=($language->direction==0) ? "right" : "left";
+	$titleTop=intval($height/7);
+	$gredient="left, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 20%, rgba(0,0,0,.9) 50%, rgba(0,0,0,0) 80%, rgba(0,0,0,0) 100%";
+	if(variable_get('aroa_slider_block_keys_align', 'center')=="left"){
+		$gredient="left, rgba(0,0,0,.9) 0%,rgba(0,0,0,0) 50%, rgba(0,0,0,0) 100%";
+	}elseif(variable_get('aroa_slider_block_keys_align', 'center')=="right"){
+		$gredient="right, rgba(0,0,0,.9) 0%,rgba(0,0,0,0) 50%,rgba(0,0,0,0) 100%";
+	}
+	ob_start();?>
+.aroa-slider-box .aroa-slider-keys:after,.aroa-slider-box .aroa-slider-content:after {content: "";clear: both;height: 1px;visibility: visible;display: block;}
+.aroa-slider-box{position:relative;display:block;width:<?php echo $width; ?>px;height:<?php echo $height; ?>px;overflow:hidden}
+.aroa-slider-box .aroa-slider-content{width:<?php echo (($Count+100)*$width); ?>px;margin-<?php echo $left; ?>:0;transition: all 1s;}
+.aroa-slider-box .aroa-slider-content .aroa-slider{width:<?php echo $width; ?>px;height:<?php echo $height; ?>px;overflow:hidden;position:relative;display:block;float:<?php echo $left; ?>;}
+
+.aroa-slider-box .aroa-slider-keys{position:absolute;left:0;bottom:0;right:0;height:24px;padding-left:10px;padding-right:10px;
+text-align:<?php echo variable_get('aroa_slider_block_keys_align', 'center'); ?>;
+background: -moz-linear-gradient(<?php echo $gredient; ?>);
+background: -webkit-linear-gradient(<?php echo $gredient; ?>);
+background: -o-linear-gradient(<?php echo $gredient; ?>);
+background: -ms-linear-gradient(<?php echo $gredient; ?>);
+background: linear-gradient(<?php echo $gredient; ?>);
+}
+.aroa-slider-box .aroa-slider-content .aroa-slider .aroa-slider-image{position:absolute;<?php echo $right ?>:0;top:0;transition: all 0.6s;}
+.aroa-slider-box .aroa-slider-content .aroa-slider:hover .aroa-slider-image{transform: scale(1.1);opacity: 0.9;}
+.aroa-slider-box .aroa-slider-content .aroa-slider .aroa-slider-title{margin-top:<?php echo $titleTop; ?>px;}
+.aroa-slider-box .aroa-slider-content .aroa-slider .aroa-slider-title A{text-decoration:none;color:<?php echo $color; ?>;}
+.aroa-slider-box .aroa-slider-content .aroa-slider .aroa-slider-title A:hover{color:<?php echo $hoverColor; ?>;}
+.aroa-slider-box .aroa-slider-content .aroa-slider .aroa-slider-body{color:<?php echo $bodyColor; ?>;}
+.aroa-slider-box .aroa-slider-content .aroa-slider .aroa-slider-title,.aroa-slider-box .aroa-slider-content .aroa-slider .aroa-slider-body{margin-<?php echo $left ?>:25px;max-width:80%;position: relative;}
+.aroa-slider-box .aroa-slider-keys span{display: inline-block;width: 10px;height: 10px;background-color: rgba(255,255,255,.5);margin-left: 5px;margin-right: 5px;margin-top: 7px;cursor:pointer;border-radius: 20px;transition: all .4s;}
+.aroa-slider-box .aroa-slider-keys span:hover{transform: scale(1.4);background-color:#FFFFFF;}
+<?php 
+	for($i=0;$i<$Count;$i++)
+		echo ".aroa-slider-box#aroa-slider-pos-".($i+1)." .aroa-slider-content{margin-".$left.":".($i*$width*-1)."px;}.aroa-slider-box#aroa-slider-pos-".($i+1)." .aroa-slider-keys span[showid=\"".($i+1)."\"]{background-color:#FFFFFF;}";
+	
+	
+	$cssCode=ob_get_contents();
+	ob_clean();
+	drupal_add_css(str_replace(array("\n","	"),"",$cssCode),array('group' => CSS_THEME,'type' => 'inline','media' => 'screen','preprocess' => FALSE,'weight' => '9999',));	
+	
+	ob_start();?>
+var aroahomePageSlideStop=false,aroahomePageSliderTimer=false,aroaslideShow=2,aroamaxSlideShow=0;
+jQuery(document).ready(function(e) {
+	aroamaxSlideShow=jQuery(".aroa-slider-box .aroa-slider-keys span").length
+	if(aroamaxSlideShow > 1)aroahomePageSliderTimer=window.setTimeout('aroaChangeSlider();',5000);
+	jQuery(".aroa-slider-box .aroa-slider-content .aroa-slider").mouseover(function(e) {aroahomePageSlideStop=true;});
+	jQuery(".aroa-slider-box .aroa-slider-content .aroa-slider").mouseout(function(e) {aroahomePageSlideStop=false;});
+	jQuery(".aroa-slider-box .aroa-slider-keys span").click(function(e) {
+		aroaslideShow=jQuery(this).attr("showid");
+        jQuery(".aroa-slider-box").attr("id","aroa-slider-pos-"+aroaslideShow);
+		window.clearTimeout(aroahomePageSliderTimer);
+		aroahomePageSliderTimer=window.setTimeout('aroaChangeSlider();',8000);
+    });
+});
+function aroaChangeSlider(){
+	ttime=2000;
+	if(!aroahomePageSlideStop){
+		jQuery(".aroa-slider-box").attr("id","aroa-slider-pos-"+aroaslideShow); 
+		aroaslideShow++;
+		if(aroaslideShow > aroamaxSlideShow)aroaslideShow=1;
+		ttime=8000;
+	}
+	aroahomePageSliderTimer=window.setTimeout('aroaChangeSlider();',ttime);
+}
+<?php
+	$jsCode=ob_get_contents();
+	ob_clean();
+	drupal_add_js(str_replace(array("\n","	"),"",$jsCode), 'inline');
+}
+
+/**
+ * Implements hook_block_configure().
+ */
+function aroa_slider_block_configure($delta = '') {
+	
+	$nodeTypes=node_type_get_types();
+	$nodeTypesOptions["aroa_slider_all_type"]=t('All types');
+	foreach($nodeTypes as $type=>$data)$nodeTypesOptions[$type]=$data->name;
+	
+	$imageStyles=image_styles();
+	foreach($imageStyles as $type=>$data)$imageStylesOptions[$type]=$data["label"];
+	
+	$form['aroa_slider_block_content_type'] = array(
+      '#type' => 'select',
+      '#title' => t('Content Type'),
+      '#default_value' => variable_get('aroa_slider_block_content_type', 'aroa_slider_all_type'),
+      '#options' => $nodeTypesOptions,
+    );	
+
+	$form['aroa_slider_block_image_styles'] = array(
+      '#type' => 'select',
+      '#title' => t('Image styles'),
+      '#default_value' => variable_get('aroa_slider_block_image_styles', 'large'),
+      '#options' => $imageStylesOptions,
+    );	
+
+	$form['aroa_slider_block_title_color'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Title color'),
+      '#default_value' => variable_get('aroa_slider_block_title_color', "#FFFFFF"),
+    );	
+
+	$form['aroa_slider_block_title_hover_color'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Title hover color'),
+      '#default_value' => variable_get('aroa_slider_block_title_hover_color', "#FF0000"),
+    );	
+
+
+	$form['aroa_slider_block_body_color'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Body color'),
+      '#default_value' => variable_get('aroa_slider_block_body_color', "#FFFFFF"),
+    );	
+
+	$form['aroa_slider_block_node_count'] = array(
+      '#type' => 'select',
+      '#title' => t('Node count'),
+      '#default_value' => variable_get('aroa_slider_block_node_count', 4),
+      '#options' => array(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40)
+    );	
+
+
+	$form['aroa_slider_block_keys_align'] = array(
+      '#type' => 'select',
+      '#title' => t('Keys align'),
+      '#default_value' => variable_get('aroa_slider_block_keys_align', 'center'),
+      '#options' => array('center'=>t('Center'),'left'=>t('Left'),'right'=>t('Right'))
+    );	
+
+
+	$form['aroa_slider_block_cache_lifetime'] = array(
+      '#type' => 'select',
+      '#title' => t('Minimum cache lifetime'),
+      '#default_value' => variable_get('aroa_slider_block_cache_lifetime', 1800),
+      '#options' => array(
+			0=>t('No cache'),
+			60=>t('@count min',array('@count'=>1)),
+			300=>t('@count min',array('@count'=>5)),
+			600=>t('@count min',array('@count'=>10)),
+			1800=>t('@count min',array('@count'=>30)),
+			3600=>t('@count hours',array('@count'=>1)),
+			7200=>t('@count hours',array('@count'=>2)),
+			10800=>t('@count hours',array('@count'=>3)),
+			86400=>t('@count days',array('@count'=>1)),
+			172800=>t('@count days',array('@count'=>2)),
+			259200=>t('@count days',array('@count'=>3)),
+			518400=>t('@count days',array('@count'=>6)),
+	  )
+    );	
+
+
+	$form['aroa_slider_block_width'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Width'),
+	  '#element_validate' => array('element_validate_number'),
+      '#default_value' => variable_get('aroa_slider_block_width', 990),
+    );	
+
+	$form['aroa_slider_block_height'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Height'),
+	  '#element_validate' => array('element_validate_number'),
+      '#default_value' => variable_get('aroa_slider_block_height', 270),
+    );
+	$form['some_text'] = array(
+		'#markup' => '<p>
+			Checkbox field name : <b>field_slider</b> <br />
+			Image field name : <b>field_slider_image</b> <br />
+		</p>'
+	);
+
+
+
+	return $form;
+}
+
+/**
+ * Implementation of hook_block_save().
+ */
+function aroa_slider_block_save($delta = '', $edit = array()) {
+	$myFields=array('aroa_slider_block_keys_align','aroa_slider_block_content_type','aroa_slider_block_width','aroa_slider_block_height','aroa_slider_block_image_styles','aroa_slider_block_node_count','aroa_slider_block_title_color','aroa_slider_block_title_hover_color','aroa_slider_block_body_color','aroa_slider_block_cache_lifetime');
+	foreach($edit as $key=>$val)if(in_array($key,$myFields))variable_set($key, $val);
+}
+
+
+/**
+ * Implementation of hook_schema().
+ */
+function aroa_slider_schema(){
+	$schema['aroa_slider'] = array(
+		'description' => t('Aroa Slider'),
+		'fields' => array(
+			'nid' => array(
+				'type' => 'int',  
+				'not null' => TRUE, 
+			),
+			'fid' => array(
+				'type' => 'int',  
+				'not null' => TRUE, 
+			),
+			'show' => array(
+				'type' => 'int',  
+				'not null' => TRUE, 
+			),
+			'time' => array(
+				'type' => 'int',  
+				'not null' => TRUE, 
+			),
+
+		),
+		'indexes' => array(
+			'show' => array('show'),
+			'time' => array('time'),
+		),
+		'primary key' => array('nid'),
+	);
+	
+	return $schema;
+}
